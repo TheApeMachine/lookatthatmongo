@@ -36,7 +36,8 @@ type Storage interface {
 	SaveOptimizationRecord(ctx context.Context, record *OptimizationRecord) error
 
 	// GetOptimizationRecord retrieves an optimization record by ID
-	GetOptimizationRecord(ctx context.Context, id string) (*OptimizationRecord, error)
+	// Optional database name can be provided to narrow the search
+	GetOptimizationRecord(ctx context.Context, id string, dbName ...string) (*OptimizationRecord, error)
 
 	// ListOptimizationRecords lists all optimization records
 	ListOptimizationRecords(ctx context.Context) ([]*OptimizationRecord, error)

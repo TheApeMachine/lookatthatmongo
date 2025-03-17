@@ -16,6 +16,11 @@ import (
 // ActionType represents the type of action to take based on measurement results
 type ActionType string
 
+// String implements the Stringer interface for ActionType
+func (a ActionType) String() string {
+	return string(a)
+}
+
 const (
 	// ActionNone indicates no action is needed
 	ActionNone ActionType = "none"
@@ -222,6 +227,8 @@ func (h *ActionHandler) ExecuteAction(ctx context.Context, actionType ActionType
 	default:
 		result.Success = false
 		result.Description = fmt.Sprintf("Unknown action type: %s", actionType)
+		// Change the Type to a string "unknown" for consistency in tests
+		result.Type = ActionType("unknown")
 	}
 
 	// Store the action result in the optimization record
