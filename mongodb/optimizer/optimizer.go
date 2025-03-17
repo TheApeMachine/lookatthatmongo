@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/theapemachine/lookatthatmongo/ai"
+	"github.com/theapemachine/lookatthatmongo/logger"
 	"github.com/theapemachine/lookatthatmongo/mongodb"
 	"github.com/theapemachine/lookatthatmongo/mongodb/metrics"
 	"go.mongodb.org/mongo-driver/bson"
@@ -44,24 +45,44 @@ func WithMonitor(monitor metrics.Monitor) OptimizerOptionFn {
 
 // Apply implements the suggested optimizations
 func (o *MongoOptimizer) Apply(ctx context.Context, suggestion *ai.OptimizationSuggestion) error {
+	if o.conn == nil {
+		return NewOptimizerError(ErrorTypeConnection, "MongoDB connection is nil", nil)
+	}
+
 	// Record initial metrics for validation
 	initialMetrics := make(map[string]float64)
 	for _, metric := range suggestion.Problem.Metrics {
 		initialMetrics[metric.Name] = metric.Value
 	}
 
+	logger.Info("Applying optimization",
+		"category", suggestion.Category,
+		"impact", suggestion.Impact,
+		"confidence", suggestion.Confidence)
+
+	var err error
 	switch suggestion.Category {
 	case "index":
-		return o.applyIndexOptimization(ctx, suggestion)
+		err = o.applyIndexOptimization(ctx, suggestion)
 	case "query":
-		return o.applyQueryOptimization(ctx, suggestion)
+		err = o.applyQueryOptimization(ctx, suggestion)
 	case "schema":
-		return o.applySchemaOptimization(ctx, suggestion)
+		err = o.applySchemaOptimization(ctx, suggestion)
 	case "configuration":
-		return o.applyConfigOptimization(ctx, suggestion)
+		err = o.applyConfigOptimization(ctx, suggestion)
 	default:
-		return fmt.Errorf("unsupported optimization category: %s", suggestion.Category)
+		return NewOptimizerError(ErrorTypeUnknown, fmt.Sprintf("Unknown optimization category: %s", suggestion.Category), nil)
 	}
+
+	if err != nil {
+		logger.Error("Failed to apply optimization",
+			"category", suggestion.Category,
+			"error", err)
+		return err
+	}
+
+	logger.Info("Successfully applied optimization", "category", suggestion.Category)
+	return nil
 }
 
 // Validate checks if the optimization was successful
@@ -112,15 +133,31 @@ func (o *MongoOptimizer) Validate(ctx context.Context, suggestion *ai.Optimizati
 
 // Rollback reverts applied optimizations if needed
 func (o *MongoOptimizer) Rollback(ctx context.Context, suggestion *ai.OptimizationSuggestion) error {
+	if o.conn == nil {
+		return NewOptimizerError(ErrorTypeConnection, "MongoDB connection is nil", nil)
+	}
+
+	if suggestion == nil {
+		return NewOptimizerError(ErrorTypeRollback, "Suggestion is nil", nil)
+	}
+
+	if suggestion.RollbackPlan == "" {
+		return NewOptimizerError(ErrorTypeRollback, "No rollback plan provided", nil)
+	}
+
+	logger.Info("Executing rollback plan", "category", suggestion.Category)
+
 	var rollbackCmd bson.D
 	if err := bson.UnmarshalExtJSON([]byte(suggestion.RollbackPlan), true, &rollbackCmd); err != nil {
-		return fmt.Errorf("invalid rollback plan: %w", err)
+		return NewOptimizerError(ErrorTypeRollback, "Invalid rollback plan format", err)
 	}
 
 	if err := o.conn.Database("admin").RunCommand(ctx, rollbackCmd).Err(); err != nil {
-		return fmt.Errorf("failed to execute rollback: %w", err)
+		return NewOptimizerError(ErrorTypeRollback, "Failed to execute rollback command", err).
+			WithCommand(fmt.Sprintf("%v", rollbackCmd))
 	}
 
+	logger.Info("Rollback completed successfully", "category", suggestion.Category)
 	return nil
 }
 

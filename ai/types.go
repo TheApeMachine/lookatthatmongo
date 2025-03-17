@@ -6,7 +6,11 @@ import (
 	"github.com/invopop/jsonschema"
 )
 
-// OptimizationSuggestion represents an AI-generated optimization recommendation
+/*
+OptimizationSuggestion represents an AI-generated optimization recommendation.
+It contains comprehensive information about a suggested MongoDB optimization,
+including the problem, solution, and validation steps.
+*/
 type OptimizationSuggestion struct {
 	Category     string   `json:"category" jsonschema:"enum=index,enum=query,enum=schema,enum=configuration" jsonschema_description:"The type of optimization being suggested"`
 	Impact       string   `json:"impact" jsonschema:"enum=high,enum=medium,enum=low" jsonschema_description:"Expected impact of implementing this suggestion"`
@@ -17,7 +21,10 @@ type OptimizationSuggestion struct {
 	RollbackPlan string   `json:"rollback_plan" jsonschema_description:"Steps to revert the changes if needed"`
 }
 
-// Problem describes the identified performance issue
+/*
+Problem describes the identified performance issue in the MongoDB database.
+It includes a description, relevant metrics, when it was first detected, and its severity.
+*/
 type Problem struct {
 	Description string    `json:"description" jsonschema_description:"Detailed description of the performance issue"`
 	Metrics     []Metric  `json:"metrics" jsonschema_description:"Relevant metrics that indicate the problem"`
@@ -25,7 +32,11 @@ type Problem struct {
 	Severity    string    `json:"severity" jsonschema:"enum=critical,enum=high,enum=medium,enum=low" jsonschema_description:"How severe the problem is"`
 }
 
-// Solution contains the detailed optimization proposal
+/*
+Solution contains the detailed optimization proposal to address the identified problem.
+It includes a description, MongoDB commands to implement the solution, relevant resources,
+and an estimate of the time and risk involved.
+*/
 type Solution struct {
 	Description  string   `json:"description" jsonschema_description:"Detailed description of the proposed solution"`
 	Commands     []string `json:"commands" jsonschema_description:"MongoDB commands to implement the solution"`
@@ -36,7 +47,11 @@ type Solution struct {
 	} `json:"time_estimate" jsonschema_description:"Implementation time and risk estimation"`
 }
 
-// Metric represents a specific performance measurement
+/*
+Metric represents a specific performance measurement related to the MongoDB database.
+It includes the metric name, current value, unit, threshold for acceptable performance,
+and the trend of the metric over time.
+*/
 type Metric struct {
 	Name      string  `json:"name" jsonschema_description:"Name of the metric"`
 	Value     float64 `json:"value" jsonschema_description:"Current value"`
@@ -45,7 +60,10 @@ type Metric struct {
 	Trend     string  `json:"trend" jsonschema:"enum=improving,enum=stable,enum=degrading" jsonschema_description:"How this metric is trending"`
 }
 
-// GenerateSchema creates a JSON schema for structured outputs
+/*
+GenerateSchema creates a JSON schema for structured outputs.
+It uses reflection to generate a schema based on the provided type T.
+*/
 func GenerateSchema[T any]() interface{} {
 	reflector := jsonschema.Reflector{
 		AllowAdditionalProperties: false,

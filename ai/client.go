@@ -7,15 +7,27 @@ import (
 	"github.com/openai/openai-go"
 )
 
+/*
+Conn represents a connection to the OpenAI API.
+It manages the client and conversation history for generating optimization suggestions.
+*/
 type Conn struct {
 	client  *openai.Client
 	history []openai.ChatCompletionMessageParamUnion
 }
 
+/*
+NewConn creates a new OpenAI API connection.
+It initializes the OpenAI client for making API requests.
+*/
 func NewConn() *Conn {
 	return &Conn{client: openai.NewClient()}
 }
 
+/*
+Generate sends a prompt to the OpenAI API and returns the generated optimization suggestion.
+It configures the API request with the appropriate schema and model settings.
+*/
 func (conn *Conn) Generate(
 	ctx context.Context,
 	prompt *Prompt,

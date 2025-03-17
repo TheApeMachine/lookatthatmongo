@@ -7,6 +7,11 @@ import (
 	"github.com/theapemachine/lookatthatmongo/mongodb/metrics"
 )
 
+/*
+Prompt represents a prompt to be sent to the AI model.
+It contains the system prompt, user prompt, metrics reports, optimization history,
+and JSON schema for structuring the AI's response.
+*/
 type Prompt struct {
 	reports map[string]*metrics.Report
 	history *OptimizationSuggestion
@@ -15,8 +20,16 @@ type Prompt struct {
 	user    string
 }
 
+/*
+PromptOption is a function type for configuring a Prompt instance.
+It follows the functional options pattern for flexible configuration.
+*/
 type PromptOption func(*Prompt)
 
+/*
+NewPrompt creates a new Prompt instance with the given options.
+It initializes the prompt with default templates and applies any provided options.
+*/
 func NewPrompt(opts ...PromptOption) *Prompt {
 	prompt := &Prompt{
 		system: templates["system_prompt"],
@@ -30,6 +43,10 @@ func NewPrompt(opts ...PromptOption) *Prompt {
 	return prompt
 }
 
+/*
+WithReport adds a metrics report to the prompt and renders the user prompt template.
+It uses the provided report to fill in the template variables.
+*/
 func WithReport(name string, report *metrics.Report) PromptOption {
 	return func(prompt *Prompt) {
 		prompt.reports[name] = report
@@ -49,18 +66,30 @@ func WithReport(name string, report *metrics.Report) PromptOption {
 	}
 }
 
+/*
+WithSchema sets the JSON schema for the prompt.
+This schema defines the structure of the expected AI response.
+*/
 func WithSchema(schema any) PromptOption {
 	return func(prompt *Prompt) {
 		prompt.schema = schema
 	}
 }
 
+/*
+WithHistory adds optimization history to the prompt.
+This allows the AI to consider previous optimizations when making suggestions.
+*/
 func WithHistory(history *OptimizationSuggestion) PromptOption {
 	return func(prompt *Prompt) {
 		prompt.history = history
 	}
 }
 
+/*
+WithTemplate sets a custom template for the prompt.
+It allows overriding the default system or user prompt templates.
+*/
 func WithTemplate(name string, tmpl string) PromptOption {
 	return func(prompt *Prompt) {
 		tmpl, err := template.New(name).Parse(tmpl)

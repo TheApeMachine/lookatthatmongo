@@ -5,7 +5,9 @@ import (
 	"time"
 )
 
-// Report represents a comprehensive performance report
+/*
+Report represents a comprehensive performance report
+*/
 type Report struct {
 	Timestamp     time.Time                     `json:"timestamp"`
 	ServerStats   *ServerStats                  `json:"serverStats"`
@@ -15,7 +17,9 @@ type Report struct {
 	monitor       Monitor
 }
 
-// Monitor interface defines methods for collecting MongoDB metrics
+/*
+Monitor interface defines methods for collecting MongoDB metrics
+*/
 type Monitor interface {
 	GetServerStats(ctx any) (*ServerStats, error)
 	GetDatabaseStats(ctx any, dbName string) (*DatabaseStats, error)
@@ -23,7 +27,9 @@ type Monitor interface {
 	GetIndexStats(ctx any, dbName, collName string) ([]IndexStats, error)
 }
 
-// NewReport creates a new report instance
+/*
+NewReport creates a new report instance
+*/
 func NewReport(monitor Monitor) *Report {
 	return &Report{
 		Timestamp:     time.Now(),
@@ -34,7 +40,9 @@ func NewReport(monitor Monitor) *Report {
 	}
 }
 
-// Collect gathers all metrics for the specified database
+/*
+Collect gathers all metrics for the specified database
+*/
 func (r *Report) Collect(ctx any, dbName string, listCollections func() ([]string, error)) error {
 	var err error
 
@@ -56,7 +64,7 @@ func (r *Report) Collect(ctx any, dbName string, listCollections func() ([]strin
 		return err
 	}
 
-	// Collect stats for each collection
+	// Collect metrics for each collection
 	for _, collName := range collections {
 		if err := r.collectCollectionMetrics(ctx, dbName, collName); err != nil {
 			return err
@@ -66,7 +74,9 @@ func (r *Report) Collect(ctx any, dbName string, listCollections func() ([]strin
 	return nil
 }
 
-// collectCollectionMetrics gathers metrics for a single collection
+/*
+collectCollectionMetrics gathers metrics for a specific collection
+*/
 func (r *Report) collectCollectionMetrics(ctx any, dbName, collName string) error {
 	// Get collection stats
 	collStats, err := r.monitor.GetCollectionStats(ctx, dbName, collName)
@@ -91,6 +101,9 @@ func (r *Report) collectCollectionMetrics(ctx any, dbName, collName string) erro
 	return nil
 }
 
+/*
+String returns a JSON string representation of the report
+*/
 func (r *Report) String() string {
 	json, err := json.Marshal(r)
 	if err != nil {

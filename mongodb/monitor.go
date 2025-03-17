@@ -8,15 +8,26 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 )
 
-// Monitor provides methods to collect various MongoDB performance metrics
+/*
+Monitor provides methods to collect various MongoDB performance metrics.
+It interfaces with different MongoDB statistics endpoints to gather comprehensive
+performance data about the server, databases, collections, and indexes.
+*/
 type Monitor struct {
 	conn               *Conn
 	performanceMonitor *metrics.PerformanceMonitor
 }
 
+/*
+MonitorOptionFn is a function type for configuring a Monitor instance.
+It follows the functional options pattern for flexible configuration.
+*/
 type MonitorOptionFn func(*Monitor)
 
-// NewMonitor creates a new Monitor instance
+/*
+NewMonitor creates a new Monitor instance.
+It accepts optional configuration functions to customize the monitor.
+*/
 func NewMonitor(opts ...MonitorOptionFn) *Monitor {
 	monitor := &Monitor{}
 
@@ -31,13 +42,19 @@ func NewMonitor(opts ...MonitorOptionFn) *Monitor {
 	return monitor
 }
 
+/*
+WithConn is an option function that sets the MongoDB connection for the monitor.
+*/
 func WithConn(conn *Conn) MonitorOptionFn {
 	return func(m *Monitor) {
 		m.conn = conn
 	}
 }
 
-// GetServerStats implements metrics.Monitor
+/*
+GetServerStats retrieves server-wide statistics from MongoDB.
+It implements the metrics.Monitor interface.
+*/
 func (monitor *Monitor) GetServerStats(ctx any) (*metrics.ServerStats, error) {
 	cmd := bson.D{{Key: "serverStatus", Value: 1}}
 	var result = &metrics.ServerStats{}
@@ -49,7 +66,9 @@ func (monitor *Monitor) GetServerStats(ctx any) (*metrics.ServerStats, error) {
 	return result, nil
 }
 
-// GetDatabaseStats implements metrics.Monitor
+/*
+GetDatabaseStats retrieves statistics for a specific database.
+*/
 func (monitor *Monitor) GetDatabaseStats(ctx any, dbName string) (*metrics.DatabaseStats, error) {
 	var result = &metrics.DatabaseStats{}
 
@@ -63,7 +82,9 @@ func (monitor *Monitor) GetDatabaseStats(ctx any, dbName string) (*metrics.Datab
 	return result, nil
 }
 
-// GetCollectionStats implements metrics.Monitor
+/*
+GetCollectionStats retrieves statistics for a specific collection.
+*/
 func (monitor *Monitor) GetCollectionStats(ctx any, dbName, collName string) (*metrics.CollectionStats, error) {
 	var result = &metrics.CollectionStats{}
 
@@ -77,7 +98,9 @@ func (monitor *Monitor) GetCollectionStats(ctx any, dbName, collName string) (*m
 	return result, nil
 }
 
-// GetIndexStats implements metrics.Monitor
+/*
+GetIndexStats retrieves statistics for all indexes in a collection.
+*/
 func (monitor *Monitor) GetIndexStats(ctx any, dbName, collName string) ([]metrics.IndexStats, error) {
 	cursor, err := monitor.conn.Database(dbName).Collection(collName).Indexes().List(ctx.(context.Context))
 	if err != nil {
@@ -110,7 +133,9 @@ func (monitor *Monitor) GetIndexStats(ctx any, dbName, collName string) ([]metri
 	return indexes, nil
 }
 
-// GetPerformanceStats collects comprehensive performance statistics
+/*
+GetPerformanceStats retrieves performance-related statistics.
+*/
 func (monitor *Monitor) GetPerformanceStats(ctx context.Context) (*metrics.PerformanceStats, error) {
 	if monitor.performanceMonitor == nil {
 		return nil, fmt.Errorf("performance monitor not initialized")
@@ -118,6 +143,9 @@ func (monitor *Monitor) GetPerformanceStats(ctx context.Context) (*metrics.Perfo
 	return monitor.performanceMonitor.CollectStats(ctx)
 }
 
+/*
+GetReplicationStatus retrieves replication status information.
+*/
 func (monitor *Monitor) GetReplicationStatus(ctx context.Context) (*metrics.RepStats, error) {
 	var result = &metrics.RepStats{}
 
