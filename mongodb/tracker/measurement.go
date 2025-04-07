@@ -102,7 +102,7 @@ func (m *Measurement) Measure(ctx context.Context) (*ai.OptimizationSuggestion, 
 		"category", latestOpt.Category,
 		"database", m.history.GetDatabaseName())
 
-	prompt := ai.NewPrompt(
+	prompt, err := ai.NewPrompt(
 		ai.WithHistory(latestOpt),
 		ai.WithReport("before", m.history.GetBeforeReport()),
 		ai.WithReport("after", m.history.GetAfterReport()),

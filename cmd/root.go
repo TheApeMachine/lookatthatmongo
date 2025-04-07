@@ -4,6 +4,7 @@ Copyright © 2025 NAME HERE <EMAIL ADDRESS>
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
 
 	"github.com/spf13/cobra"
@@ -43,8 +44,23 @@ var rootCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		logger.Info("Starting MongoDB optimization", "database", cfg.DatabaseName)
 
-		// Create storage for optimization history
-		store, err := storage.NewFileStorage(cfg.StoragePath)
+		// Create storage for optimization history based on configuration
+		var store storage.Storage
+		var err error
+
+		if cfg.StorageType == config.S3Storage {
+			logger.Info("Using S3 storage", "bucket", cfg.S3Bucket, "region", cfg.S3Region)
+			store, err = storage.NewS3Storage(cmd.Context(),
+				storage.WithBucket(cfg.S3Bucket),
+				storage.WithRegion(cfg.S3Region),
+				storage.WithPrefix(cfg.S3Prefix),
+			)
+		} else {
+			// Default to file storage
+			logger.Info("Using file storage", "path", cfg.StoragePath)
+			store, err = storage.NewFileStorage(cfg.StoragePath)
+		}
+
 		if err != nil {
 			return fmt.Errorf("failed to initialize storage: %w", err)
 		}
@@ -79,29 +95,45 @@ var rootCmd = &cobra.Command{
 		// Generate optimization suggestions
 		logger.Info("Generating optimization suggestions")
 		aiconn := ai.NewConn()
-		prompt := ai.NewPrompt(ai.WithReport("before", beforeReport))
-		suggestion, err := aiconn.Generate(cmd.Context(), prompt)
+		prompt, err := ai.NewPrompt(
+			ai.WithReport("before", beforeReport),
+			ai.WithSchema(ai.OptimizationSuggestionSchema),
+		)
+		if err != nil {
+			return fmt.Errorf("failed to create prompt: %w", err)
+		}
+		rawSuggestion, err := aiconn.Generate(cmd.Context(), prompt)
 		if err != nil {
 			return fmt.Errorf("failed to generate optimization suggestions: %w", err)
 		}
 
-		// Add suggestion to history
-		history.AddOptimization(suggestion.(*ai.OptimizationSuggestion))
+		// Convert the generic map[string]interface{} to *ai.OptimizationSuggestion
+		var typedSuggestion *ai.OptimizationSuggestion
+		suggestionBytes, err := json.Marshal(rawSuggestion)
+		if err != nil {
+			return fmt.Errorf("failed to marshal raw suggestion: %w", err)
+		}
+		if err := json.Unmarshal(suggestionBytes, &typedSuggestion); err != nil {
+			return fmt.Errorf("failed to unmarshal suggestion into typed struct: %w", err)
+		}
+
+		// Now use typedSuggestion for subsequent operations
+		history.AddOptimization(typedSuggestion)
 
 		// Apply optimizations
 		logger.Info("Applying optimizations",
-			"category", suggestion.(*ai.OptimizationSuggestion).Category,
-			"impact", suggestion.(*ai.OptimizationSuggestion).Impact)
+			"category", typedSuggestion.Category,
+			"impact", typedSuggestion.Impact)
 		opt := optimizer.NewOptimizer(
 			optimizer.WithConnection(conn),
 			optimizer.WithMonitor(monitor),
 		)
 
-		if err := opt.Apply(cmd.Context(), suggestion.(*ai.OptimizationSuggestion)); err != nil {
+		if err := opt.Apply(cmd.Context(), cfg.DatabaseName, typedSuggestion); err != nil {
 			// Attempt rollback on failure if enabled
 			if cfg.EnableRollback {
 				logger.Error("Optimization failed, attempting rollback", "error", err)
-				if rbErr := opt.Rollback(cmd.Context(), suggestion.(*ai.OptimizationSuggestion)); rbErr != nil {
+				if rbErr := opt.Rollback(cmd.Context(), cfg.DatabaseName, typedSuggestion); rbErr != nil {
 					return fmt.Errorf("optimization failed and rollback failed: %v (rollback: %v)", err, rbErr)
 				}
 				return fmt.Errorf("optimization failed but rolled back successfully: %v", err)
@@ -148,7 +180,7 @@ var rootCmd = &cobra.Command{
 
 		// Validate the changes
 		logger.Info("Validating optimization")
-		result, err := opt.Validate(cmd.Context(), suggestion.(*ai.OptimizationSuggestion))
+		result, err := opt.Validate(cmd.Context(), cfg.DatabaseName, typedSuggestion)
 		if err != nil {
 			return fmt.Errorf("validation failed: %w", err)
 		}
@@ -176,8 +208,22 @@ It is automatically called when the package is imported.
 func init() {
 	// Define flags
 	rootCmd.Flags().StringVar(&cfg.DatabaseName, "db", cfg.DatabaseName, "MongoDB database name to optimize")
-	rootCmd.Flags().StringVar(&cfg.StoragePath, "storage", cfg.StoragePath, "Path to store optimization history")
+
+	// Storage flags
+	rootCmd.Flags().StringVar((*string)(&cfg.StorageType), "storage-type", string(cfg.StorageType), "Storage type (file or s3)")
+	rootCmd.Flags().StringVar(&cfg.StoragePath, "storage-path", cfg.StoragePath, "Path to store optimization history (for file storage)")
+
+	// S3 storage flags
+	rootCmd.Flags().StringVar(&cfg.S3Bucket, "s3-bucket", cfg.S3Bucket, "S3 bucket name for optimization history")
+	rootCmd.Flags().StringVar(&cfg.S3Region, "s3-region", cfg.S3Region, "AWS region for S3 (default: us-east-1)")
+	rootCmd.Flags().StringVar(&cfg.S3Prefix, "s3-prefix", cfg.S3Prefix, "Prefix for S3 objects (default: optimization-records/)")
+	rootCmd.Flags().IntVar(&cfg.S3RetentionDays, "s3-retention-days", cfg.S3RetentionDays, "Number of days to keep records in S3 before auto-deletion")
+	rootCmd.Flags().StringVar(&cfg.S3CredentialsFile, "s3-credentials", cfg.S3CredentialsFile, "Path to AWS credentials file")
+
+	// Logging flags
 	rootCmd.Flags().StringVar(&logLevel, "log-level", "info", "Log level (debug, info, warn, error)")
+
+	// Optimization flags
 	rootCmd.Flags().Float64Var(&cfg.ImprovementThreshold, "threshold", cfg.ImprovementThreshold, "Improvement threshold percentage")
 	rootCmd.Flags().BoolVar(&cfg.EnableRollback, "enable-rollback", cfg.EnableRollback, "Enable automatic rollback on failure")
 	rootCmd.Flags().IntVar(&cfg.MaxOptimizations, "max-optimizations", cfg.MaxOptimizations, "Maximum number of optimizations to apply")

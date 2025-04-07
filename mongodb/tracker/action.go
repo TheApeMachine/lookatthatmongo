@@ -126,11 +126,14 @@ func (h *ActionHandler) ProcessMeasurement(ctx context.Context, suggestion *ai.O
 		"confidence", suggestion.Confidence)
 
 	// Create a prompt for the AI to determine the action to take
-	prompt := ai.NewPrompt(
+	prompt, err := ai.NewPrompt(
 		ai.WithHistory(suggestion),
 		ai.WithReport("before", beforeReport),
 		ai.WithReport("after", afterReport),
 	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create prompt: %w", err)
+	}
 
 	// Ask the AI to determine what action to take
 	response, err := h.aiConn.Generate(ctx, prompt)
@@ -166,6 +169,18 @@ func (h *ActionHandler) ExecuteAction(ctx context.Context, actionType ActionType
 		Timestamp: time.Now(),
 	}
 
+	// Get database name from history
+	databaseName := ""
+	if h.history != nil {
+		databaseName = h.history.GetDatabaseName()
+	} else {
+		// Handle case where history might be nil, though it shouldn't be in normal flow
+		logger.Error("Cannot determine database name, history is nil")
+		result.Success = false
+		result.Description = "Internal error: Cannot determine database name for action."
+		return result, fmt.Errorf("history is nil in ExecuteAction")
+	}
+
 	switch actionType {
 	case ActionNone:
 		result.Success = true
@@ -190,7 +205,7 @@ func (h *ActionHandler) ExecuteAction(ctx context.Context, actionType ActionType
 				"improvement", improvement,
 				"category", suggestion.Category)
 
-			if err := h.optimizer.Rollback(ctx, suggestion); err != nil {
+			if err := h.optimizer.Rollback(ctx, databaseName, suggestion); err != nil {
 				logger.Error("Rollback failed", "error", err)
 				result.Success = false
 				result.Description = fmt.Sprintf("Rollback failed: %v", err)
@@ -210,7 +225,7 @@ func (h *ActionHandler) ExecuteAction(ctx context.Context, actionType ActionType
 			logger.Info("Applying additional optimizations",
 				"category", suggestion.Category)
 
-			if err := h.optimizer.Apply(ctx, suggestion); err != nil {
+			if err := h.optimizer.Apply(ctx, databaseName, suggestion); err != nil {
 				logger.Error("Additional optimization failed", "error", err)
 				result.Success = false
 				result.Description = fmt.Sprintf("Additional optimization failed: %v", err)
@@ -236,7 +251,7 @@ func (h *ActionHandler) ExecuteAction(ctx context.Context, actionType ActionType
 		// Create a record of this optimization and action
 		record := &storage.OptimizationRecord{
 			Timestamp:        time.Now(),
-			DatabaseName:     h.history.GetDatabaseName(),
+			DatabaseName:     databaseName,
 			BeforeReport:     h.history.GetBeforeReport(),
 			AfterReport:      h.history.GetAfterReport(),
 			Suggestion:       suggestion,

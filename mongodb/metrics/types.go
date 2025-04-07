@@ -68,15 +68,15 @@ type DatabaseStats struct {
 
 // CollectionStats represents collection-level statistics
 type CollectionStats struct {
-	Name         string             `json:"name" bson:"name"`
-	Size         float64            `json:"size" bson:"size"` // in bytes
-	Count        int64              `json:"count" bson:"count"`
-	AvgObjSize   float64            `json:"avgObjSize" bson:"avgObjSize"`   // in bytes
-	StorageSize  float64            `json:"storageSize" bson:"storageSize"` // in bytes
-	Capped       bool               `json:"capped" bson:"capped"`
-	MaxSize      float64            `json:"maxSize,omitempty" bson:"maxSize,omitempty"`
-	IndexSizes   map[string]float64 `json:"indexSizes" bson:"indexSizes"`
-	IndexDetails []IndexStats       `json:"indexDetails" bson:"indexDetails"`
+	Name         string                `json:"name" bson:"name"`
+	Size         float64               `json:"size" bson:"size"` // in bytes
+	Count        int64                 `json:"count" bson:"count"`
+	AvgObjSize   float64               `json:"avgObjSize" bson:"avgObjSize"`   // in bytes
+	StorageSize  float64               `json:"storageSize" bson:"storageSize"` // in bytes
+	Capped       bool                  `json:"capped" bson:"capped"`
+	MaxSize      float64               `json:"maxSize,omitempty" bson:"maxSize,omitempty"`
+	IndexSizes   map[string]float64    `json:"indexSizes" bson:"indexSizes"`
+	IndexDetails map[string]IndexStats `json:"indexDetails" bson:"indexDetails"`
 }
 
 // IndexStats represents index statistics

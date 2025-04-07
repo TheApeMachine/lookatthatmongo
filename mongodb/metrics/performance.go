@@ -3,18 +3,29 @@ package metrics
 import (
 	"context"
 	"fmt"
+	"strings"
+	"sync"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 )
 
 type OptionFn func(*PerformanceMonitor)
 
+// previousCounts stores the previous counter values and their timestamps
+type previousCounts struct {
+	sync.RWMutex
+	counts    map[string]int64
+	timestamp time.Time
+}
+
 // PerformanceMonitor handles collection of performance-related metrics
 type PerformanceMonitor struct {
 	client *mongo.Client
 	opts   []OptionFn
+	prev   *previousCounts
 }
 
 // NewPerformanceMonitor creates a new performance monitor with the given options
@@ -22,6 +33,10 @@ func NewPerformanceMonitor(client *mongo.Client, opts ...OptionFn) *PerformanceM
 	return &PerformanceMonitor{
 		client: client,
 		opts:   opts,
+		prev: &previousCounts{
+			counts:    make(map[string]int64),
+			timestamp: time.Now(),
+		},
 	}
 }
 
@@ -94,14 +109,31 @@ func (pm *PerformanceMonitor) collectThroughputStats(ctx context.Context, stats 
 		return fmt.Errorf("invalid opcounters format")
 	}
 
-	now := time.Now().Unix()
+	now := time.Now()
+
+	// Calculate rates for each operation type
+	reads := getMetric[int64](pm, opcounters, "query")
+	writes := getMetric[int64](pm, opcounters, "insert") +
+		getMetric[int64](pm, opcounters, "update") +
+		getMetric[int64](pm, opcounters, "delete")
+	commands := getMetric[int64](pm, opcounters, "command")
+
+	// Update stats with calculated rates
 	stats.Throughput = ThroughputStats{
-		ReadsPerSecond:    pm.calculateRate(getMetric[int64](pm, opcounters, "query"), now),
-		WritesPerSecond:   pm.calculateRate(getMetric[int64](pm, opcounters, "insert")+getMetric[int64](pm, opcounters, "update")+getMetric[int64](pm, opcounters, "delete"), now),
-		CommandsPerSecond: pm.calculateRate(getMetric[int64](pm, opcounters, "command"), now),
+		ReadsPerSecond:    pm.calculateRate("reads", reads, now),
+		WritesPerSecond:   pm.calculateRate("writes", writes, now),
+		CommandsPerSecond: pm.calculateRate("commands", commands, now),
 		NetworkInBytes:    getMetric[int64](pm, network, "bytesIn"),
 		NetworkOutBytes:   getMetric[int64](pm, network, "bytesOut"),
 	}
+
+	// Store current values for next calculation
+	pm.prev.Lock()
+	pm.prev.counts["reads"] = reads
+	pm.prev.counts["writes"] = writes
+	pm.prev.counts["commands"] = commands
+	pm.prev.timestamp = now
+	pm.prev.Unlock()
 
 	return nil
 }
@@ -215,11 +247,30 @@ func (pm *PerformanceMonitor) parseLatency(metrics bson.M, opType string) Operat
 	}
 }
 
-func (pm *PerformanceMonitor) calculateRate(count, timestamp int64) float64 {
-	if timestamp == 0 {
-		return 0
+func (pm *PerformanceMonitor) calculateRate(metric string, currentCount int64, now time.Time) float64 {
+	pm.prev.RLock()
+	prevCount, exists := pm.prev.counts[metric]
+	prevTime := pm.prev.timestamp
+	pm.prev.RUnlock()
+
+	if !exists {
+		return 0 // First collection, can't calculate rate yet
 	}
-	return float64(count) / float64(timestamp)
+
+	// Calculate time difference in seconds
+	duration := now.Sub(prevTime).Seconds()
+	if duration <= 0 {
+		return 0 // Avoid division by zero or negative rates
+	}
+
+	// Calculate rate (operations per second)
+	countDiff := currentCount - prevCount
+	if countDiff < 0 {
+		// Counter reset (e.g., server restart), use current value
+		countDiff = currentCount
+	}
+
+	return float64(countDiff) / duration
 }
 
 func getMetric[T any](perfMon *PerformanceMonitor, m bson.M, keys ...string) T {
@@ -239,12 +290,102 @@ func getMetric[T any](perfMon *PerformanceMonitor, m bson.M, keys ...string) T {
 	return *new(T)
 }
 
+// formatQueryPattern normalizes a MongoDB query pattern by replacing specific values
+// with placeholders while preserving the query structure. This helps identify similar
+// queries that differ only in their parameter values.
 func (pm *PerformanceMonitor) formatQueryPattern(query any) string {
 	if query == nil {
 		return ""
 	}
-	// Implement query pattern normalization logic here
-	return fmt.Sprintf("%v", query)
+
+	switch q := query.(type) {
+	case bson.D:
+		return pm.normalizeDocument(q)
+	case bson.M:
+		// Convert bson.M to bson.D for consistent ordering
+		d := make(bson.D, 0, len(q))
+		for k, v := range q {
+			d = append(d, bson.E{Key: k, Value: v})
+		}
+		return pm.normalizeDocument(d)
+	case []any:
+		return pm.normalizeArray(q)
+	case string, float64, int64, int32, bool:
+		return "<?>"
+	default:
+		return fmt.Sprintf("<?:%T>", q)
+	}
+}
+
+// normalizeDocument normalizes a BSON document by replacing values with placeholders
+func (pm *PerformanceMonitor) normalizeDocument(doc bson.D) string {
+	if len(doc) == 0 {
+		return "{}"
+	}
+
+	var parts []string
+	for _, elem := range doc {
+		normalized := pm.normalizeValue(elem.Value)
+
+		// Special handling for operators
+		if len(elem.Key) > 0 && elem.Key[0] == '$' {
+			// Keep actual values for certain operators where the value type matters
+			switch elem.Key {
+			case "$type", "$size", "$exists", "$mod", "$options":
+				normalized = fmt.Sprintf("%v", elem.Value)
+			}
+		}
+
+		parts = append(parts, fmt.Sprintf("%q:%s", elem.Key, normalized))
+	}
+
+	return "{" + strings.Join(parts, ",") + "}"
+}
+
+// normalizeArray normalizes an array of values
+func (pm *PerformanceMonitor) normalizeArray(arr []any) string {
+	if len(arr) == 0 {
+		return "[]"
+	}
+
+	var parts []string
+	for _, v := range arr {
+		parts = append(parts, pm.normalizeValue(v))
+	}
+
+	return "[" + strings.Join(parts, ",") + "]"
+}
+
+// normalizeValue normalizes a single value based on its type
+func (pm *PerformanceMonitor) normalizeValue(val any) string {
+	switch v := val.(type) {
+	case nil:
+		return "null"
+	case bson.D:
+		return pm.normalizeDocument(v)
+	case bson.M:
+		d := make(bson.D, 0, len(v))
+		for k, mv := range v {
+			d = append(d, bson.E{Key: k, Value: mv})
+		}
+		return pm.normalizeDocument(d)
+	case []any:
+		return pm.normalizeArray(v)
+	case map[string]any:
+		d := make(bson.D, 0, len(v))
+		for k, mv := range v {
+			d = append(d, bson.E{Key: k, Value: mv})
+		}
+		return pm.normalizeDocument(d)
+	case string, float64, int64, int32, bool, time.Time:
+		return "<?>"
+	case primitive.ObjectID:
+		return "<ObjectId>"
+	case primitive.Regex:
+		return fmt.Sprintf("<regex:%q>", v.Pattern)
+	default:
+		return fmt.Sprintf("<?:%T>", v)
+	}
 }
 
 func (pm *PerformanceMonitor) listDatabases(ctx context.Context) ([]string, error) {

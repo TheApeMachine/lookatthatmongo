@@ -12,12 +12,12 @@ It provides methods to apply optimizations, validate their effectiveness,
 and roll back changes if necessary.
 */
 type Optimizer interface {
-	// Apply implements the suggested optimizations
-	Apply(ctx context.Context, suggestion *ai.OptimizationSuggestion) error
-	// Validate checks if the optimization was successful
-	Validate(ctx context.Context, suggestion *ai.OptimizationSuggestion) (*ValidationResult, error)
-	// Rollback reverts applied optimizations if needed
-	Rollback(ctx context.Context, suggestion *ai.OptimizationSuggestion) error
+	// Apply applies the suggested optimization.
+	Apply(ctx context.Context, databaseName string, suggestion *ai.OptimizationSuggestion) error
+	// Validate checks if the optimization was successful based on the provided validation steps.
+	Validate(ctx context.Context, databaseName string, suggestion *ai.OptimizationSuggestion) (*ValidationResult, error)
+	// Rollback reverts applied optimizations if needed, based on the rollback plan in the suggestion.
+	Rollback(ctx context.Context, databaseName string, suggestion *ai.OptimizationSuggestion) error
 }
 
 /*

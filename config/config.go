@@ -11,6 +11,16 @@ import (
 	"github.com/theapemachine/lookatthatmongo/logger"
 )
 
+// StorageType represents the type of storage to use
+type StorageType string
+
+const (
+	// FileStorage represents file-based storage
+	FileStorage StorageType = "file"
+	// S3Storage represents S3-based storage
+	S3Storage StorageType = "s3"
+)
+
 /*
 Config holds the application configuration including MongoDB connection settings,
 storage settings, logging settings, and optimization parameters.
@@ -21,7 +31,15 @@ type Config struct {
 	DatabaseName string
 
 	// Storage settings
+	StorageType StorageType
 	StoragePath string
+
+	// S3 Storage settings
+	S3Bucket          string
+	S3Region          string
+	S3Prefix          string
+	S3RetentionDays   int    // Number of days to keep records before auto-deletion
+	S3CredentialsFile string // Path to AWS credentials file
 
 	// Logging settings
 	LogLevel log.Level
@@ -47,8 +65,14 @@ func New() *Config {
 	return &Config{
 		MongoURI:             os.Getenv("MONGO_URI"),
 		DatabaseName:         getEnvWithDefault("MONGO_DB", "FanAppDev2"),
+		StorageType:          StorageType(getEnvWithDefault("STORAGE_TYPE", string(FileStorage))),
 		StoragePath:          getEnvWithDefault("STORAGE_PATH", defaultStoragePath),
-		LogLevel:             parseLogLevel(getEnvWithDefault("LOG_LEVEL", "info")),
+		S3Bucket:             getEnvWithDefault("S3_BUCKET", ""),
+		S3Region:             getEnvWithDefault("S3_REGION", "us-east-1"),
+		S3Prefix:             getEnvWithDefault("S3_PREFIX", "optimization-records/"),
+		S3RetentionDays:      parseInt(getEnvWithDefault("S3_RETENTION_DAYS", "90")),
+		S3CredentialsFile:    getEnvWithDefault("S3_CREDENTIALS_FILE", ""),
+		LogLevel:             parseLogLevel(getEnvWithDefault("LOG_LEVEL", "debug")),
 		ImprovementThreshold: parseFloat(getEnvWithDefault("IMPROVEMENT_THRESHOLD", "5.0")),
 		EnableRollback:       parseBool(getEnvWithDefault("ENABLE_ROLLBACK", "true")),
 		MaxOptimizations:     parseInt(getEnvWithDefault("MAX_OPTIMIZATIONS", "3")),
@@ -66,6 +90,17 @@ func (c *Config) Validate() error {
 
 	if c.DatabaseName == "" {
 		return fmt.Errorf("database name is required")
+	}
+
+	// Validate storage-specific settings
+	if c.StorageType == S3Storage {
+		if c.S3Bucket == "" {
+			return fmt.Errorf("S3_BUCKET environment variable is required when STORAGE_TYPE=s3")
+		}
+	} else if c.StorageType == FileStorage {
+		// For file storage, no additional validation needed
+	} else {
+		return fmt.Errorf("invalid storage type: %s (valid values: file, s3)", c.StorageType)
 	}
 
 	return nil

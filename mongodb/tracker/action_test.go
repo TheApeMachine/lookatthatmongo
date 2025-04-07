@@ -11,21 +11,21 @@ import (
 
 // mockOptimizer is a mock implementation of the Optimizer interface
 type mockOptimizer struct {
-	applyFunc    func(ctx context.Context, suggestion *ai.OptimizationSuggestion) error
-	validateFunc func(ctx context.Context, suggestion *ai.OptimizationSuggestion) (*optimizer.ValidationResult, error)
-	rollbackFunc func(ctx context.Context, suggestion *ai.OptimizationSuggestion) error
+	applyFunc    func(ctx context.Context, databaseName string, suggestion *ai.OptimizationSuggestion) error
+	validateFunc func(ctx context.Context, databaseName string, suggestion *ai.OptimizationSuggestion) (*optimizer.ValidationResult, error)
+	rollbackFunc func(ctx context.Context, databaseName string, suggestion *ai.OptimizationSuggestion) error
 }
 
-func (m *mockOptimizer) Apply(ctx context.Context, suggestion *ai.OptimizationSuggestion) error {
-	return m.applyFunc(ctx, suggestion)
+func (m *mockOptimizer) Apply(ctx context.Context, databaseName string, suggestion *ai.OptimizationSuggestion) error {
+	return m.applyFunc(ctx, databaseName, suggestion)
 }
 
-func (m *mockOptimizer) Validate(ctx context.Context, suggestion *ai.OptimizationSuggestion) (*optimizer.ValidationResult, error) {
-	return m.validateFunc(ctx, suggestion)
+func (m *mockOptimizer) Validate(ctx context.Context, databaseName string, suggestion *ai.OptimizationSuggestion) (*optimizer.ValidationResult, error) {
+	return m.validateFunc(ctx, databaseName, suggestion)
 }
 
-func (m *mockOptimizer) Rollback(ctx context.Context, suggestion *ai.OptimizationSuggestion) error {
-	return m.rollbackFunc(ctx, suggestion)
+func (m *mockOptimizer) Rollback(ctx context.Context, databaseName string, suggestion *ai.OptimizationSuggestion) error {
+	return m.rollbackFunc(ctx, databaseName, suggestion)
 }
 
 func TestActionResult(t *testing.T) {
@@ -220,14 +220,16 @@ func TestExecuteAction(t *testing.T) {
 		Convey("When executing an action of type ActionRollback with an optimizer", func() {
 			rollbackCalled := false
 			optimizer := &mockOptimizer{
-				rollbackFunc: func(ctx context.Context, s *ai.OptimizationSuggestion) error {
+				rollbackFunc: func(ctx context.Context, dbName string, s *ai.OptimizationSuggestion) error {
 					rollbackCalled = true
 					return nil
 				},
 			}
 
+			history := NewHistory(WithDatabaseName("testDB"))
 			handler := NewActionHandler(
 				WithOptimizer(optimizer),
+				WithActionHistory(history),
 			)
 
 			suggestion := &ai.OptimizationSuggestion{
@@ -270,14 +272,16 @@ func TestExecuteAction(t *testing.T) {
 		Convey("When executing an action of type ActionOptimize with an optimizer", func() {
 			applyCalled := false
 			optimizer := &mockOptimizer{
-				applyFunc: func(ctx context.Context, s *ai.OptimizationSuggestion) error {
+				applyFunc: func(ctx context.Context, dbName string, s *ai.OptimizationSuggestion) error {
 					applyCalled = true
 					return nil
 				},
 			}
 
+			history := NewHistory(WithDatabaseName("testDB"))
 			handler := NewActionHandler(
 				WithOptimizer(optimizer),
+				WithActionHistory(history),
 			)
 
 			suggestion := &ai.OptimizationSuggestion{

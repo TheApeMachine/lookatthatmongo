@@ -2,16 +2,13 @@ package optimizer
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"strings"
 
 	"github.com/theapemachine/lookatthatmongo/ai"
 	"github.com/theapemachine/lookatthatmongo/logger"
 	"github.com/theapemachine/lookatthatmongo/mongodb"
 	"github.com/theapemachine/lookatthatmongo/mongodb/metrics"
 	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
 )
 
 // MongoOptimizer implements the Optimizer interface for MongoDB
@@ -44,7 +41,7 @@ func WithMonitor(monitor metrics.Monitor) OptimizerOptionFn {
 }
 
 // Apply implements the suggested optimizations
-func (o *MongoOptimizer) Apply(ctx context.Context, suggestion *ai.OptimizationSuggestion) error {
+func (o *MongoOptimizer) Apply(ctx context.Context, databaseName string, suggestion *ai.OptimizationSuggestion) error {
 	if o.conn == nil {
 		return NewOptimizerError(ErrorTypeConnection, "MongoDB connection is nil", nil)
 	}
@@ -56,6 +53,7 @@ func (o *MongoOptimizer) Apply(ctx context.Context, suggestion *ai.OptimizationS
 	}
 
 	logger.Info("Applying optimization",
+		"database", databaseName,
 		"category", suggestion.Category,
 		"impact", suggestion.Impact,
 		"confidence", suggestion.Confidence)
@@ -63,30 +61,31 @@ func (o *MongoOptimizer) Apply(ctx context.Context, suggestion *ai.OptimizationS
 	var err error
 	switch suggestion.Category {
 	case "index":
-		err = o.applyIndexOptimization(ctx, suggestion)
+		err = o.applyIndexOptimization(ctx, databaseName, suggestion)
 	case "query":
-		err = o.applyQueryOptimization(ctx, suggestion)
+		err = o.applyQueryOptimization(ctx, databaseName, suggestion)
 	case "schema":
-		err = o.applySchemaOptimization(ctx, suggestion)
+		err = o.applySchemaOptimization(ctx, databaseName, suggestion)
 	case "configuration":
-		err = o.applyConfigOptimization(ctx, suggestion)
+		err = o.applyConfigOptimization(ctx, databaseName, suggestion)
 	default:
 		return NewOptimizerError(ErrorTypeUnknown, fmt.Sprintf("Unknown optimization category: %s", suggestion.Category), nil)
 	}
 
 	if err != nil {
 		logger.Error("Failed to apply optimization",
+			"database", databaseName,
 			"category", suggestion.Category,
 			"error", err)
 		return err
 	}
 
-	logger.Info("Successfully applied optimization", "category", suggestion.Category)
+	logger.Info("Successfully applied optimization", "database", databaseName, "category", suggestion.Category)
 	return nil
 }
 
 // Validate checks if the optimization was successful
-func (o *MongoOptimizer) Validate(ctx context.Context, suggestion *ai.OptimizationSuggestion) (*ValidationResult, error) {
+func (o *MongoOptimizer) Validate(ctx context.Context, databaseName string, suggestion *ai.OptimizationSuggestion) (*ValidationResult, error) {
 	result := &ValidationResult{
 		Category: suggestion.Category,
 		Metrics:  make(map[string]Metric),
@@ -95,7 +94,7 @@ func (o *MongoOptimizer) Validate(ctx context.Context, suggestion *ai.Optimizati
 	// Run validation steps from the suggestion
 	var totalImprovement float64
 	for _, step := range suggestion.Validation {
-		metric, err := o.validateStep(ctx, step)
+		metric, err := o.validateStep(ctx, databaseName, step)
 		if err != nil {
 			return nil, err
 		}
@@ -132,7 +131,7 @@ func (o *MongoOptimizer) Validate(ctx context.Context, suggestion *ai.Optimizati
 }
 
 // Rollback reverts applied optimizations if needed
-func (o *MongoOptimizer) Rollback(ctx context.Context, suggestion *ai.OptimizationSuggestion) error {
+func (o *MongoOptimizer) Rollback(ctx context.Context, databaseName string, suggestion *ai.OptimizationSuggestion) error {
 	if o.conn == nil {
 		return NewOptimizerError(ErrorTypeConnection, "MongoDB connection is nil", nil)
 	}
@@ -141,269 +140,290 @@ func (o *MongoOptimizer) Rollback(ctx context.Context, suggestion *ai.Optimizati
 		return NewOptimizerError(ErrorTypeRollback, "Suggestion is nil", nil)
 	}
 
-	if suggestion.RollbackPlan == "" {
-		return NewOptimizerError(ErrorTypeRollback, "No rollback plan provided", nil)
+	if len(suggestion.Solution.Operations) == 0 {
+		logger.Info("No operations found in suggestion, nothing to rollback", "database", databaseName)
+		return nil // Nothing to rollback
 	}
 
-	logger.Info("Executing rollback plan", "category", suggestion.Category)
+	logger.Info("Executing rollback plan by reversing operations", "database", databaseName, "category", suggestion.Category)
 
-	var rollbackCmd bson.D
-	if err := bson.UnmarshalExtJSON([]byte(suggestion.RollbackPlan), true, &rollbackCmd); err != nil {
-		return NewOptimizerError(ErrorTypeRollback, "Invalid rollback plan format", err)
-	}
+	// Iterate through operations in reverse order for rollback?
+	// For simplicity now, iterate forward. Order might matter for dependencies.
+	for _, op := range suggestion.Solution.Operations {
+		var rollbackCmd bson.D
+		var description string
 
-	if err := o.conn.Database("admin").RunCommand(ctx, rollbackCmd).Err(); err != nil {
-		return NewOptimizerError(ErrorTypeRollback, "Failed to execute rollback command", err).
-			WithCommand(fmt.Sprintf("%v", rollbackCmd))
-	}
-
-	logger.Info("Rollback completed successfully", "category", suggestion.Category)
-	return nil
-}
-
-func (o *MongoOptimizer) applyIndexOptimization(ctx context.Context, suggestion *ai.OptimizationSuggestion) error {
-	for _, cmd := range suggestion.Solution.Commands {
-		var indexCmd bson.D
-		if err := bson.UnmarshalExtJSON([]byte(cmd), true, &indexCmd); err != nil {
-			return fmt.Errorf("invalid index command: %w", err)
-		}
-
-		// Extract database and collection from the command
-		dbName, collName, err := extractDbCollection(indexCmd)
-		if err != nil {
-			return err
-		}
-
-		// Apply the index command
-		if err := o.conn.Database(dbName).RunCommand(ctx, indexCmd).Err(); err != nil {
-			return fmt.Errorf("failed to apply index optimization: %w", err)
-		}
-
-		// Verify index was created
-		indexes := o.conn.Database(dbName).Collection(collName).Indexes()
-		cursor, err := indexes.List(ctx)
-		if err != nil {
-			return fmt.Errorf("failed to verify index creation: %w", err)
-		}
-		defer cursor.Close(ctx)
-
-		var found bool
-		for cursor.Next(ctx) {
-			var idx bson.M
-			if err := cursor.Decode(&idx); err != nil {
-				return fmt.Errorf("failed to decode index: %w", err)
+		switch op.Action {
+		case "createIndex":
+			// Rollback for createIndex is dropIndex
+			indexNameToDrop := op.Name
+			if op.Options.Name != "" {
+				indexNameToDrop = op.Options.Name
 			}
-			if compareIndexes(idx, indexCmd) {
-				found = true
-				break
+			if op.Collection == "" || indexNameToDrop == "" {
+				logger.Error("Cannot determine rollback for createIndex: missing collection or index name", "operation", op)
+				return NewOptimizerError(ErrorTypeRollback, "Cannot determine rollback for createIndex: missing collection or index name", nil)
 			}
-		}
-
-		if !found {
-			return fmt.Errorf("index was not created successfully")
-		}
-	}
-	return nil
-}
-
-func (o *MongoOptimizer) applyQueryOptimization(ctx context.Context, suggestion *ai.OptimizationSuggestion) error {
-	for _, cmd := range suggestion.Solution.Commands {
-		var queryCmd struct {
-			Collection string  `json:"collection"`
-			Database   string  `json:"database"`
-			Operation  string  `json:"operation"`
-			Query      bson.D  `json:"query"`
-			Update     bson.D  `json:"update,omitempty"`
-			Options    *bson.D `json:"options,omitempty"`
-			Hint       string  `json:"hint,omitempty"`
-		}
-
-		if err := json.Unmarshal([]byte(cmd), &queryCmd); err != nil {
-			return fmt.Errorf("invalid query command: %w", err)
-		}
-
-		coll := o.conn.Database(queryCmd.Database).Collection(queryCmd.Collection)
-
-		switch queryCmd.Operation {
-		case "createView":
-			if err := coll.Database().CreateView(ctx, queryCmd.Collection+"_view", queryCmd.Collection, mongo.Pipeline{queryCmd.Query}); err != nil {
-				return fmt.Errorf("failed to create view: %w", err)
+			rollbackCmd = bson.D{
+				{Key: "dropIndexes", Value: op.Collection},
+				{Key: "index", Value: indexNameToDrop},
 			}
-		case "addHint":
-			// Add hint to collection metadata
-			if err := coll.Database().RunCommand(ctx, bson.D{
-				{Key: "collMod", Value: queryCmd.Collection},
-				{Key: "index", Value: queryCmd.Hint},
-			}).Err(); err != nil {
-				return fmt.Errorf("failed to add hint: %w", err)
+			description = fmt.Sprintf("dropIndex %s on %s", indexNameToDrop, op.Collection)
+
+		case "dropIndex":
+			// Rollback for dropIndex is createIndex
+			if op.Collection == "" || len(op.Keys) == 0 {
+				logger.Error("Cannot determine rollback for dropIndex: missing collection or keys", "operation", op)
+				return NewOptimizerError(ErrorTypeRollback, "Cannot determine rollback for dropIndex: missing collection or keys", nil)
 			}
+			indexDoc := bson.D{{Key: "key", Value: op.Keys}}
+			if op.Name != "" {
+				indexDoc = append(indexDoc, bson.E{Key: "name", Value: op.Name})
+			}
+			// Re-apply options if they existed
+			if op.Options.Unique {
+				indexDoc = append(indexDoc, bson.E{Key: "unique", Value: true})
+			}
+			if op.Options.Sparse {
+				indexDoc = append(indexDoc, bson.E{Key: "sparse", Value: true})
+			}
+			if op.Options.ExpireAfterSeconds != nil {
+				indexDoc = append(indexDoc, bson.E{Key: "expireAfterSeconds", Value: *op.Options.ExpireAfterSeconds})
+			}
+			// Add other options if needed
+
+			rollbackCmd = bson.D{
+				{Key: "createIndexes", Value: op.Collection},
+				{Key: "indexes", Value: bson.A{indexDoc}},
+			}
+			description = fmt.Sprintf("createIndex on %s with keys %v", op.Collection, op.Keys)
+
 		default:
-			return fmt.Errorf("unsupported query operation: %s", queryCmd.Operation)
+			logger.Warn("Skipping rollback for unsupported action type", "action", op.Action)
+			continue // Skip unsupported actions
+		}
+
+		logger.Debug("Executing rollback command", "database", databaseName, "description", description, "command_bson", rollbackCmd)
+		if err := o.conn.Database(databaseName).RunCommand(ctx, rollbackCmd).Err(); err != nil {
+			// Should we stop rollback on first error, or try to continue?
+			// For now, stop on first error.
+			logger.Error("Rollback command execution failed", "database", databaseName, "command", rollbackCmd, "error", err)
+			return NewOptimizerError(ErrorTypeRollback, "Failed to execute rollback command", err).
+				WithCommand(fmt.Sprintf("%v", rollbackCmd))
 		}
 	}
+
+	logger.Info("Rollback completed successfully", "database", databaseName, "category", suggestion.Category)
 	return nil
 }
 
-func (o *MongoOptimizer) applySchemaOptimization(ctx context.Context, suggestion *ai.OptimizationSuggestion) error {
-	for _, cmd := range suggestion.Solution.Commands {
-		var schemaCmd struct {
-			Collection string `json:"collection"`
-			Database   string `json:"database"`
-			Operation  string `json:"operation"`
-			Pipeline   bson.A `json:"pipeline,omitempty"`
-			Validator  bson.D `json:"validator,omitempty"`
+func (o *MongoOptimizer) applyIndexOptimization(ctx context.Context, databaseName string, suggestion *ai.OptimizationSuggestion) error {
+	if len(suggestion.Solution.Operations) == 0 {
+		logger.Warn("No index operations provided in the suggestion", "database", databaseName)
+		return nil
+	}
+
+	for _, op := range suggestion.Solution.Operations {
+		var cmd bson.D
+		var indexNameForCheck string // Name used for existence checks
+
+		// --- Pre-Apply Validation --- START ---
+		logger.Info("Performing pre-apply validation", "action", op.Action, "db", databaseName, "coll", op.Collection)
+
+		// 1. Check if collection exists
+		collExists, err := o.checkCollectionExists(ctx, databaseName, op.Collection)
+		if err != nil {
+			return fmt.Errorf("failed during collection existence check: %w", err)
+		}
+		if !collExists {
+			return fmt.Errorf("pre-apply validation failed: collection '%s' does not exist in database '%s'", op.Collection, databaseName)
+		}
+		logger.Debug("Collection exists check passed", "db", databaseName, "coll", op.Collection)
+
+		// Determine the index name to use for checks
+		if op.Action == "createIndex" {
+			indexNameForCheck = op.Name // Use name from operation if provided
+			if op.Options.Name != "" {
+				indexNameForCheck = op.Options.Name // Override with name from options
+			}
+		} else if op.Action == "dropIndex" {
+			indexNameForCheck = op.Name
 		}
 
-		if err := json.Unmarshal([]byte(cmd), &schemaCmd); err != nil {
-			return fmt.Errorf("invalid schema command: %w", err)
+		// 2. Check index existence based on action (only if name is specified)
+		if indexNameForCheck != "" {
+			indexExists, err := o.verifyIndexExists(ctx, databaseName, op.Collection, indexNameForCheck)
+			if err != nil {
+				return fmt.Errorf("failed during index existence check: %w", err)
+			}
+
+			if op.Action == "createIndex" && indexExists {
+				return fmt.Errorf("pre-apply validation failed: index '%s' already exists on collection '%s'", indexNameForCheck, op.Collection)
+			}
+			if op.Action == "dropIndex" && !indexExists {
+				return fmt.Errorf("pre-apply validation failed: index '%s' does not exist on collection '%s'", indexNameForCheck, op.Collection)
+			}
+			logger.Debug("Index existence check passed", "action", op.Action, "db", databaseName, "coll", op.Collection, "name", indexNameForCheck, "exists_status", indexExists)
+		} else if op.Action == "dropIndex" {
+			// If dropping index and no name provided (shouldn't happen based on struct tags, but check)
+			return fmt.Errorf("pre-apply validation failed: index name is required for dropIndex")
 		}
+		// --- Pre-Apply Validation --- END ---
 
-		db := o.conn.Database(schemaCmd.Database)
+		// --- Build Command --- START ---
+		verificationName := indexNameForCheck // Keep track for post-apply verification
 
-		switch schemaCmd.Operation {
-		case "aggregate":
-			// Run aggregation pipeline to transform data
-			if _, err := db.Collection(schemaCmd.Collection).Aggregate(ctx, schemaCmd.Pipeline); err != nil {
-				return fmt.Errorf("failed to run schema transformation: %w", err)
+		switch op.Action {
+		case "createIndex":
+			if op.Collection == "" || len(op.Keys) == 0 {
+				return fmt.Errorf("invalid createIndex operation parameters: missing collection or keys") // Should be caught by schema validation ideally
 			}
-		case "setValidator":
-			// Update collection with schema validation
-			if err := db.RunCommand(ctx, bson.D{
-				{Key: "collMod", Value: schemaCmd.Collection},
-				{Key: "validator", Value: schemaCmd.Validator},
-			}).Err(); err != nil {
-				return fmt.Errorf("failed to set validator: %w", err)
+			indexDoc := bson.D{{Key: "key", Value: op.Keys}}
+			if indexNameForCheck != "" {
+				indexDoc = append(indexDoc, bson.E{Key: "name", Value: indexNameForCheck})
 			}
+			// Add options...
+			if op.Options.Unique {
+				indexDoc = append(indexDoc, bson.E{Key: "unique", Value: true})
+			}
+			if op.Options.Sparse {
+				indexDoc = append(indexDoc, bson.E{Key: "sparse", Value: true})
+			}
+			if op.Options.ExpireAfterSeconds != nil {
+				indexDoc = append(indexDoc, bson.E{Key: "expireAfterSeconds", Value: *op.Options.ExpireAfterSeconds})
+			}
+
+			cmd = bson.D{
+				{Key: "createIndexes", Value: op.Collection},
+				{Key: "indexes", Value: bson.A{indexDoc}},
+			}
+			logger.Info("Constructed createIndexes command", "db", databaseName, "coll", op.Collection, "keys", op.Keys, "name", indexNameForCheck)
+
+		case "dropIndex":
+			if op.Collection == "" || indexNameForCheck == "" { // Name checked in validation block already
+				return fmt.Errorf("invalid dropIndex operation parameters: missing collection or index name")
+			}
+			cmd = bson.D{
+				{Key: "dropIndexes", Value: op.Collection},
+				{Key: "index", Value: indexNameForCheck},
+			}
+			logger.Info("Constructed dropIndexes command", "db", databaseName, "coll", op.Collection, "name", indexNameForCheck)
+
 		default:
-			return fmt.Errorf("unsupported schema operation: %s", schemaCmd.Operation)
+			return fmt.Errorf("unsupported index action: %s", op.Action)
 		}
-	}
-	return nil
-}
+		// --- Build Command --- END ---
 
-func (o *MongoOptimizer) applyConfigOptimization(ctx context.Context, suggestion *ai.OptimizationSuggestion) error {
-	for _, cmd := range suggestion.Solution.Commands {
-		var configCmd bson.D
-		if err := bson.UnmarshalExtJSON([]byte(cmd), true, &configCmd); err != nil {
-			return fmt.Errorf("invalid config command: %w", err)
+		// Apply the constructed command
+		logger.Debug("Executing index command", "database", databaseName, "collection", op.Collection, "command_bson", cmd)
+		if err := o.conn.Database(databaseName).RunCommand(ctx, cmd).Err(); err != nil {
+			logger.Error("Index command execution failed", "database", databaseName, "collection", op.Collection, "command_bson", cmd, "error", err)
+			return fmt.Errorf("failed to apply index optimization (%s): %w", op.Action, err)
 		}
 
-		// Apply configuration change
-		if err := o.conn.Database("admin").RunCommand(ctx, configCmd).Err(); err != nil {
-			return fmt.Errorf("failed to apply config change: %w", err)
-		}
-
-		// Verify the change was applied
-		result := o.conn.Database("admin").RunCommand(ctx, bson.D{{Key: "getParameter", Value: "*"}})
-		var params bson.M
-		if err := result.Decode(&params); err != nil {
-			return fmt.Errorf("failed to verify config change: %w", err)
-		}
-
-		// Check if the parameter was set correctly
-		for _, elem := range configCmd {
-			if elem.Key == "setParameter" {
-				paramValue, ok := params[elem.Key]
-				if !ok || paramValue != elem.Value {
-					return fmt.Errorf("config parameter %s was not set correctly", elem.Key)
-				}
+		// Post-Apply Verification (simplified)
+		if verificationName != "" {
+			foundAfter, verifyErr := o.verifyIndexExists(ctx, databaseName, op.Collection, verificationName)
+			if verifyErr != nil {
+				logger.Error("Error during post-apply index verification", "db", databaseName, "coll", op.Collection, "name", verificationName, "error", verifyErr)
+				// Optionally continue or return error
 			}
+
+			if op.Action == "createIndex" && !foundAfter {
+				logger.Error("Post-apply verification failed: index not found after createIndex", "db", databaseName, "coll", op.Collection, "name", verificationName)
+				return fmt.Errorf("index '%s' was not created successfully on %s.%s (verification failed)", verificationName, databaseName, op.Collection)
+			}
+			if op.Action == "dropIndex" && foundAfter {
+				logger.Error("Post-apply verification failed: index still found after dropIndex", "db", databaseName, "coll", op.Collection, "name", verificationName)
+				return fmt.Errorf("index '%s' was not dropped successfully on %s.%s (verification failed)", verificationName, databaseName, op.Collection)
+			}
+			logger.Info("Index operation post-apply verified successfully", "action", op.Action, "db", databaseName, "coll", op.Collection, "name", verificationName, "found_status_after_op", foundAfter)
 		}
 	}
 	return nil
 }
 
-func (o *MongoOptimizer) validateStep(ctx context.Context, step string) (*ai.Metric, error) {
-	// Parse the validation step
-	var validation struct {
-		MetricName string   `json:"metric_name"`
-		Command    bson.D   `json:"command"`
-		Extract    []string `json:"extract"`
-	}
-
-	if err := json.Unmarshal([]byte(step), &validation); err != nil {
-		return nil, fmt.Errorf("invalid validation step: %w", err)
-	}
-
-	// Run the validation command
-	result := o.conn.Database("admin").RunCommand(ctx, validation.Command)
-	var response bson.M
-	if err := result.Decode(&response); err != nil {
-		return nil, fmt.Errorf("failed to run validation: %w", err)
-	}
-
-	// Extract the metric value using the path
-	value, err := extractMetricValue(response, validation.Extract)
+// checkCollectionExists checks if a collection exists in a database.
+func (o *MongoOptimizer) checkCollectionExists(ctx context.Context, dbName, collName string) (bool, error) {
+	filter := bson.M{"name": collName}
+	names, err := o.conn.Database(dbName).ListCollectionNames(ctx, filter)
 	if err != nil {
-		return nil, fmt.Errorf("failed to extract metric: %w", err)
+		return false, fmt.Errorf("failed to list collections for existence check: %w", err)
 	}
-
-	return &ai.Metric{
-		Name:  validation.MetricName,
-		Value: value,
-	}, nil
+	return len(names) > 0, nil
 }
 
-// Helper functions
+// verifyIndexExists checks if an index with a specific name exists.
+func (o *MongoOptimizer) verifyIndexExists(ctx context.Context, dbName, collName, indexName string) (bool, error) {
+	indexesView := o.conn.Database(dbName).Collection(collName).Indexes()
+	cursor, err := indexesView.List(ctx)
+	if err != nil {
+		return false, fmt.Errorf("failed to list indexes for verification: %w", err)
+	}
+	defer cursor.Close(ctx)
 
-func extractDbCollection(cmd bson.D) (string, string, error) {
-	var dbName, collName string
-	for _, elem := range cmd {
-		switch elem.Key {
-		case "createIndexes":
-			collName = elem.Value.(string)
-		case "$db":
-			dbName = elem.Value.(string)
+	for cursor.Next(ctx) {
+		var idx bson.M
+		if err := cursor.Decode(&idx); err != nil {
+			// Log error but continue checking other indexes if possible
+			logger.Error("Failed to decode index during verification", "error", err)
+			continue
+		}
+		if name, ok := idx["name"].(string); ok && name == indexName {
+			return true, nil // Found the index
 		}
 	}
-	if dbName == "" || collName == "" {
-		return "", "", fmt.Errorf("could not extract database and collection names")
-	}
-	return dbName, collName, nil
+	return false, cursor.Err() // Return false and any cursor error
 }
 
-func compareIndexes(existing bson.M, new bson.D) bool {
-	// Convert new index to map for comparison
-	newMap := make(map[string]interface{})
-	for _, elem := range new {
-		newMap[elem.Key] = elem.Value
+func (o *MongoOptimizer) applyQueryOptimization(ctx context.Context, databaseName string, suggestion *ai.OptimizationSuggestion) error {
+	// TODO: Implement query optimization based on suggestion.Solution.Operations
+	if len(suggestion.Solution.Operations) > 0 {
+		logger.Warn("Query optimization via structured operations not yet implemented", "database", databaseName)
+		// Example: Loop through ops, check op.Action, build and run find/update/aggregate commands
 	}
-
-	// Compare relevant fields
-	relevantFields := []string{"key", "unique", "sparse", "background"}
-	for _, field := range relevantFields {
-		if existing[field] != newMap[field] {
-			return false
-		}
-	}
-	return true
+	return fmt.Errorf("query optimization not implemented") // Return error until implemented
+	// Old logic using suggestion.Solution.Commands removed
 }
 
-func extractMetricValue(data bson.M, path []string) (float64, error) {
-	current := interface{}(data)
-	for _, key := range path {
-		switch v := current.(type) {
-		case bson.M:
-			var ok bool
-			current, ok = v[key]
-			if !ok {
-				return 0, fmt.Errorf("key %s not found in path %s", key, strings.Join(path, "."))
-			}
-		default:
-			return 0, fmt.Errorf("invalid path %s", strings.Join(path, "."))
-		}
+func (o *MongoOptimizer) applySchemaOptimization(ctx context.Context, databaseName string, suggestion *ai.OptimizationSuggestion) error {
+	// TODO: Implement schema optimization based on suggestion.Solution.Operations
+	if len(suggestion.Solution.Operations) > 0 {
+		logger.Warn("Schema optimization via structured operations not yet implemented", "database", databaseName)
+		// Example: Loop through ops, check op.Action, build and run collMod commands
 	}
-
-	switch v := current.(type) {
-	case float64:
-		return v, nil
-	case int64:
-		return float64(v), nil
-	case int32:
-		return float64(v), nil
-	case int:
-		return float64(v), nil
-	default:
-		return 0, fmt.Errorf("value at path %s is not a number", strings.Join(path, "."))
-	}
+	return fmt.Errorf("schema optimization not implemented") // Return error until implemented
+	// Old logic using suggestion.Solution.Commands removed
 }
+
+func (o *MongoOptimizer) applyConfigOptimization(ctx context.Context, databaseName string, suggestion *ai.OptimizationSuggestion) error {
+	// TODO: Implement config optimization based on suggestion.Solution.Operations
+	if len(suggestion.Solution.Operations) > 0 {
+		logger.Warn("Configuration optimization via structured operations not yet implemented", "database", databaseName)
+		// Example: Loop through ops, check op.Action, build and run setParameter commands
+	}
+	return fmt.Errorf("config optimization not implemented") // Return error until implemented
+	// Old logic using suggestion.Solution.Commands removed
+}
+
+// validateStep might need databaseName too, depending on implementation
+func (o *MongoOptimizer) validateStep(ctx context.Context, databaseName string, step string) (*ai.Metric, error) {
+	// TODO: Implement validation logic - this likely involves running commands
+	// or queries against the specific databaseName and parsing results.
+	// For now, return a dummy metric.
+	logger.Warn("Validation step execution not fully implemented", "step", step, "database", databaseName)
+	return &ai.Metric{Name: step, Value: 0.0}, nil // Placeholder
+}
+
+// Helper functions extractCollectionName and compareIndexes are no longer needed and can be removed.
+/*
+func extractCollectionName(cmd bson.D) (string, error) {
+	// ... implementation ...
+}
+*/
+
+/*
+func compareIndexes(idx bson.M, createCmd bson.D) bool {
+	// ... implementation ...
+}
+*/
